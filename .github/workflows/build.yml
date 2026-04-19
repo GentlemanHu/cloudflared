@@ -1,0 +1,82 @@
+name: build-android-armv7
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      BINARY_NAME: cloudflared
+      TARGET_OS: android
+      TARGET_ARCH: arm
+      TARGET_ARM: "7"
+      CGO_ENABLED: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      - name: Show Go env
+        run: |
+          go version
+          go env
+
+      - name: Download dependencies
+        run: |
+          go mod download
+
+      - name: Build Android armv7 binary
+        env:
+          GOOS: ${{ env.TARGET_OS }}
+          GOARCH: ${{ env.TARGET_ARCH }}
+          GOARM: ${{ env.TARGET_ARM }}
+        run: |
+          mkdir -p dist
+          OUT="dist/${BINARY_NAME}-${TARGET_OS}-armv7"
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags="-s -w" \
+            -o "${OUT}" \
+            ./cmd/cloudflared
+
+          chmod +x "${OUT}"
+          sha256sum "${OUT}" > "${OUT}.sha256"
+
+      - name: Inspect binary
+        run: |
+          file dist/${BINARY_NAME}-${TARGET_OS}-armv7 || true
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflared-android-armv7
+          path: |
+            dist/cloudflared-android-armv7
+            dist/cloudflared-android-armv7.sha256
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/cloudflared-android-armv7
+            dist/cloudflared-android-armv7.sha256
+          generate_release_notes: true
