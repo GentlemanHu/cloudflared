@@ -94,12 +94,17 @@ jobs:
         run: |
           mkdir -p dist
           OUT="dist/${BINARY_NAME}-android-${{ matrix.arch }}"
+          
+          # 直接 patch Makefile 去掉 netgo tag，或者不走 make 直接 go build
+          # 关键：不加 -tags netgo，加 -tags netcgo 强制用 CGO resolver
           go build \
             -trimpath \
             -buildvcs=false \
+            -tags "netcgo osusergo" \
             -ldflags="-s -w" \
             -o "${OUT}" \
             ./cmd/cloudflared
+          
           chmod +x "${OUT}"
           file "${OUT}" || true
           sha256sum "${OUT}" > "${OUT}.sha256"
