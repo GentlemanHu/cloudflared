@@ -18,12 +18,10 @@ jobs:
           - arch: armv7
             goarch: arm
             goarm: "7"
-            abi: armeabi-v7a
             clang_prefix: armv7a-linux-androideabi
           - arch: arm64-v8a
             goarch: arm64
             goarm: ""
-            abi: arm64-v8a
             clang_prefix: aarch64-linux-android
 
     env:
@@ -33,8 +31,6 @@ jobs:
       CGO_ENABLED: "1"
       ANDROID_API_LEVEL: "21"
       ANDROID_NDK_VERSION: "27.2.12479018"
-      # Termux resolv.conf 实际路径
-      TERMUX_RESOLV_CONF: /data/data/com.termux/files/usr/etc/resolv.conf
 
     steps:
       - name: Checkout
@@ -47,16 +43,6 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: true
-
-      - name: Patch Go stdlib resolv.conf path for Android/Termux
-        run: |
-          GOROOT=$(go env GOROOT)
-          DNS_CONFIG="$GOROOT/src/net/dnsconfig_unix.go"
-          echo "Patching $DNS_CONFIG"
-          cp "$DNS_CONFIG" "$DNS_CONFIG.bak"
-          sed -i 's|"/etc/resolv.conf"|"${{ env.TERMUX_RESOLV_CONF }}"|g' "$DNS_CONFIG"
-          echo "=== Result ==="
-          grep -n "resolv" "$DNS_CONFIG"
 
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v3
@@ -78,25 +64,64 @@ jobs:
           echo "LD=$TOOLCHAIN/bin/ld"             >> $GITHUB_ENV
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip"  >> $GITHUB_ENV
 
-      - name: Show toolchain info
+      - name: Inject Android DNS fix
         run: |
-          echo "CC=$CC"
-          go version
-          "$CC" --version
+          # 创建一个新包，用 init() 在进程启动时强制覆盖 Go 的 net.DefaultResolver
+          # 使其直接连接 Android 系统 DNS（8.8.8.8 作为后备，运行时可被系统覆盖）
+          mkdir -p cmd/cloudflared_android_dns
+          cat > cmd/cloudflared_android_dns/dns_android.go << 'EOF'
+          //go:build android
+
+          package main
+
+          import (
+          	"context"
+          	"net"
+          )
+
+          func init() {
+          	// Android/Termux 没有 /etc/resolv.conf，Go 纯 resolver 会 fallback 到 [::1]:53
+          	// 直接替换 DefaultResolver 为显式指向 Android 系统 DNS
+          	net.DefaultResolver = &net.Resolver{
+          		PreferGo: false,
+          		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+          			d := net.Dialer{}
+          			// 优先尝试 Android 常见系统 DNS 地址
+          			for _, dns := range []string{
+          				"8.8.8.8:53",
+          				"1.1.1.1:53",
+          				"114.114.114.114:53",
+          			} {
+          				conn, err := d.DialContext(ctx, "udp", dns)
+          				if err == nil {
+          					return conn, nil
+          				}
+          			}
+          			// fallback: 尝试原始地址
+          			return d.DialContext(ctx, network, address)
+          		},
+          	}
+          }
+          EOF
+
+          # 把这个文件放到 cloudflared 主包里（cmd/cloudflared/）
+          # 注意：package 声明要和目标包一致
+          sed -i 's/^package main/package main/' cmd/cloudflared_android_dns/dns_android.go || true
+          cp cmd/cloudflared_android_dns/dns_android.go cmd/cloudflared/dns_android_fix.go
+
+          echo "=== Injected file ==="
+          cat cmd/cloudflared/dns_android_fix.go
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Build ${{ matrix.abi }}
+      - name: Build ${{ matrix.arch }}
         env:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
         run: |
           mkdir -p dist
           OUT="dist/${BINARY_NAME}-android-${{ matrix.arch }}"
-          
-          # 直接 patch Makefile 去掉 netgo tag，或者不走 make 直接 go build
-          # 关键：不加 -tags netgo，加 -tags netcgo 强制用 CGO resolver
           go build \
             -trimpath \
             -buildvcs=false \
@@ -104,7 +129,6 @@ jobs:
             -ldflags="-s -w" \
             -o "${OUT}" \
             ./cmd/cloudflared
-          
           chmod +x "${OUT}"
           file "${OUT}" || true
           sha256sum "${OUT}" > "${OUT}.sha256"
