@@ -1,4 +1,4 @@
-name: build-android-armv7
+name: build-android-multi
 
 on:
   workflow_dispatch:
@@ -12,15 +12,25 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: armv7
+            goarch: arm
+            goarm: "7"
+            abi: armeabi-v7a
+            clang_prefix: armv7a-linux-androideabi
+          - arch: arm64-v8a
+            goarch: arm64
+            goarm: ""
+            abi: arm64-v8a
+            clang_prefix: aarch64-linux-android
 
     env:
       BINARY_NAME: cloudflared
       GO_VERSION: "1.26.2"
       GOOS: android
-      GOARCH: arm
-      GOARM: "7"
       CGO_ENABLED: "1"
-
       # Android 5.0 = API 21
       ANDROID_API_LEVEL: "21"
       ANDROID_NDK_VERSION: "27.2.12479018"
@@ -49,13 +59,12 @@ jobs:
         run: |
           NDK="$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-
-          echo "ANDROID_NDK_ROOT=$NDK" >> $GITHUB_ENV
-          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
-          echo "CC=$TOOLCHAIN/bin/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang" >> $GITHUB_ENV
-          echo "CXX=$TOOLCHAIN/bin/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang++" >> $GITHUB_ENV
-          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
-          echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK"          >> $GITHUB_ENV
+          echo "TOOLCHAIN=$TOOLCHAIN"            >> $GITHUB_ENV
+          echo "CC=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}${ANDROID_API_LEVEL}-clang"   >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}${ANDROID_API_LEVEL}-clang++" >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar"       >> $GITHUB_ENV
+          echo "LD=$TOOLCHAIN/bin/ld"            >> $GITHUB_ENV
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
 
       - name: Show toolchain info
@@ -65,26 +74,24 @@ jobs:
           echo "TOOLCHAIN=$TOOLCHAIN"
           echo "CC=$CC"
           go version
-          go env
           "$CC" --version
 
       - name: Download dependencies
-        run: |
-          go mod download
+        run: go mod download
 
-      - name: Build Android armv7
+      - name: Build ${{ matrix.abi }}
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
         run: |
           mkdir -p dist
-
-          OUT="dist/${BINARY_NAME}-android-armv7"
-
+          OUT="dist/${BINARY_NAME}-android-${{ matrix.arch }}"
           go build \
             -trimpath \
             -buildvcs=false \
             -ldflags="-s -w" \
             -o "${OUT}" \
             ./cmd/cloudflared
-
           chmod +x "${OUT}"
           file "${OUT}" || true
           sha256sum "${OUT}" > "${OUT}.sha256"
@@ -92,16 +99,28 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cloudflared-android-armv7
+          name: cloudflared-android-${{ matrix.arch }}
           path: |
-            dist/cloudflared-android-armv7
-            dist/cloudflared-android-armv7.sha256
+            dist/cloudflared-android-${{ matrix.arch }}
+            dist/cloudflared-android-${{ matrix.arch }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/android-v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/cloudflared-android-armv7
             dist/cloudflared-android-armv7.sha256
+            dist/cloudflared-android-arm64-v8a
+            dist/cloudflared-android-arm64-v8a.sha256
           generate_release_notes: true
